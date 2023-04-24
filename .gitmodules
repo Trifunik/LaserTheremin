@@ -1,0 +1,3 @@
+[submodule "vl53l0x"]
+	path = vl53l0x
+	url = https://github.com/orionrobots/vl53l0x
