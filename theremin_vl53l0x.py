@@ -9,7 +9,7 @@ import utime
 # Init. constants
 TONE_FREQ_START = 200
 TONE_FREQ_STEP = 100
-TONE_FREQ_END = 3500 # --> 168 steps
+TONE_FREQ_END = 2000 # --> 168 steps
 
 CONV_VALUE = ((TONE_FREQ_END - TONE_FREQ_START) / TONE_FREQ_STEP) / 500
 print(CONV_VALUE) # <-- DEBUG
@@ -25,11 +25,14 @@ palm = 100
 finger = 100
 
 # TODO: Make vol part of AMPLITUDE
-AMPLITUDE = 1000 # For 16-bit, max of 32767 (it'll clip around 30k)
+AMPLITUDE = 32767 # For 16-bit, max of 32767 (it'll clip around 30k)
 
 vol_bytearray = bytearray()
 palm_bytearray = bytearray()
 finger_bytearray = bytearray()
+
+palm_off = False
+finger_off = False
 
 # Init. Pins
 SDA = Pin(17)
@@ -51,6 +54,25 @@ SD_PIN1 = Pin(22) # Serial data (DIN on breakout)
 vol_shutdown.off()
 palm_shutdown.off()
 finger_shutdown.off()
+
+# Init. data buses
+i2c = I2C(1, sda=SDA, scl=SCL)
+
+audio0 = I2S(0, # This must be either 0 or 1 for ESP32
+            sck=SCK_PIN0, ws=WS_PIN0, sd=SD_PIN0,
+            mode=I2S.TX,
+            bits=8*BYTES_PER_SAMPLE,
+            format=I2S.MONO,
+            rate=SAMPLE_RATE,
+            ibuf=I2S_BUF)
+
+audio1 = I2S(1, # This must be either 0 or 1 for ESP32
+             sck=SCK_PIN1, ws=WS_PIN1, sd=SD_PIN1,
+             mode=I2S.TX,
+             bits=8*BYTES_PER_SAMPLE,
+             format=I2S.MONO,
+             rate=SAMPLE_RATE,
+             ibuf=I2S_BUF)
 
 # Set new addresses to the i2c bus devices
 vol_shutdown.on()
@@ -75,25 +97,6 @@ distance value goes from 40 to 530
 
 dict_freq = {}
 
-# Init. data buses
-i2c = I2C(1, sda=SDA, scl=SCL)
-
-audio0 = I2S(0, # This must be either 0 or 1 for ESP32
-            sck=SCK_PIN0, ws=WS_PIN0, sd=SD_PIN0,
-            mode=I2S.TX,
-            bits=8*BYTES_PER_SAMPLE,
-            format=I2S.MONO,
-            rate=SAMPLE_RATE,
-            ibuf=I2S_BUF)
-
-audio1 = I2S(1, # This must be either 0 or 1 for ESP32
-             sck=SCK_PIN1, ws=WS_PIN1, sd=SD_PIN1,
-             mode=I2S.TX,
-             bits=8*BYTES_PER_SAMPLE,
-             format=I2S.MONO,
-             rate=SAMPLE_RATE,
-             ibuf=I2S_BUF)
-
 # Calc. frequency data
 freq = TONE_FREQ_START
 while freq <= TONE_FREQ_END:
@@ -105,42 +108,38 @@ while freq <= TONE_FREQ_END:
         sample = int(AMPLITUDE * math.sin(2 * math.pi * i / n_samples))
         struct.pack_into("<h", buf, i*BYTES_PER_SAMPLE, sample)
 
-    print(len(buf)) # <-- DEBUG
+    print(freq,' ', len(buf)) # <-- DEBUG
     dict_freq.update({freq: buf})
     freq = freq + TONE_FREQ_STEP
 
 def first_i2s():
- #   global dict_freq
     global audio0
     global finger_bytearray
 
     while True:
-        #audio0.write(dict_freq[finger])
         audio0.write(finger_bytearray)
 
 def second_i2s():
-#    global dict_freq
     global audio1
     global palm_bytearray
     
     while True:
-        #audio1.write(dict_freq[palm])
         audio1.write(palm_bytearray)
-        
+
 def get_distance():
     global TONE_FREQ_STEP
     global CONV_VALUE
     global TONE_FREQ_START
     global TONE_FREQ_END
     
-    #global vol
-    #global palm
-    #global finger
     global dict_freq
 
     global vol_bytearray
     global palm_bytearray
     global finger_bytearray
+
+    global palm_off
+    global finger_off
     
     vol_tmp = 0
     vol_mean = 0
@@ -173,44 +172,55 @@ def get_distance():
         palm_mean = (palm_mean + palm_tmp)/2
         palm_tmp = int((palm_mean - 40)*CONV_VALUE) * TONE_FREQ_STEP
 
-        if palm_tmp > TONE_FREQ_END:
-            palm = TONE_FREQ_END
-        elif palm_tmp <= TONE_FREQ_START:
-            palm = TONE_FREQ_START
+        if (palm_tmp > TONE_FREQ_END) or (palm_tmp <= TONE_FREQ_START):
+            palm_off = True
         else:
+            palm_off = False
             palm = palm_tmp
-
-        palm_bytearray = dict_freq[palm]+dict_freq[palm]+dict_freq[palm]
+            #print("palm ",palm)
+            palm_bytearray = dict_freq[palm]
 
         finger_tmp = finger_tofl.ping()
         finger_mean = (finger_mean + finger_tmp)/2 
         finger_tmp = int((finger_mean - 40)*CONV_VALUE) * TONE_FREQ_STEP
 
-        if finger_tmp > TONE_FREQ_END:
-            finger = TONE_FREQ_END   
-        elif finger_tmp <= TONE_FREQ_START:
-            finger = TONE_FREQ_START
+        if (finger_tmp > TONE_FREQ_END) or (finger_tmp <= TONE_FREQ_START):
+            finger_off = True
         else:
+            finger_off = False
             finger = finger_tmp
+            #print("finger ",finger)
+            finger_bytearray = dict_freq[finger]
 
-        finger_bytearray = dict_freq[finger]+dict_freq[finger]+dict_freq[finger]
-        #time.sleep(0.2)
 
+def multiplier_bytearray():
+    global palm_bytearray
+    global finger_bytearray
 
-#_thread.start_new_thread(first_i2s,())        
+    len_palm = len(palm_bytearray)
+    len_finger = len(finger_bytearray)
+
+    #print (len_palm, len_finger )
+    if len_palm != 0 and len_finger != 0:
+        if len_palm > len_finger:
+            return 1, round(len_palm/len_finger)
+        elif len_palm < len_finger:
+            return round(len_finger/len_palm), 1
+
+    return 1, 1
+
+#_thread.start_new_thread(first_i2s,())
 #_thread.start_new_thread(second_i2s, ())
 _thread.start_new_thread(get_distance,())
 
-#index = TONE_FREQ_START
-while True: #index <= TONE_FREQ_END:
-    #print('   ',finger )
-    audio0.write(finger_bytearray) # check to switch here the order
-    audio1.write(palm_bytearray)
-    #get_distance()
-    #audio1.write(dict_freq[325])
-    #audio1.write(buf1)
+while True:
 
-    #index = index + 100
-    
-audio0.deinit()
-audio1.deinit()
+    multi_palm, multi_finger = multiplier_bytearray()
+
+    if palm_off != True:
+        for x in range(multi_palm):
+            audio1.write( palm_bytearray)
+        
+    if finger_off != True:
+        for x in range(multi_finger):
+            audio0.write(finger_bytearray)
